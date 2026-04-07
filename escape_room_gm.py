@@ -26,7 +26,7 @@ def data_path(filename):
 
 # ── Bundled deps live inside the package ────────────────────────────────────
 CONFIG_FILE = data_path("config.json")
-AUDIO_FILE  = data_path("audio.mp3")
+AUDIO_FILE  = data_path("audio.wav")
 
 DEFAULT_CONFIG = {
     "passcode": "1234",
@@ -52,15 +52,12 @@ def _ps_quote(s):
     return s.replace("'", "''")
 
 def generate_audio(text, callback=None):
-    import tempfile, shutil
     try:
-        # Synthesize to temp WAV, convert to MP3, keep only MP3
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp_wav = tmp.name
+        # Synthesize directly to WAV (Windows PowerShell TTS)
         script = f"""
 Add-Type -AssemblyName System.Speech
 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-$synth.SetOutputToWaveFile('{_ps_quote(tmp_wav)}')
+$synth.SetOutputToWaveFile('{_ps_quote(AUDIO_FILE)}')
 $synth.Speak('{_ps_quote(text)}')
 $synth.Dispose()
 """
@@ -70,27 +67,9 @@ $synth.Dispose()
             capture_output=True,
             text=True,
         )
-        ffmpeg_bin = shutil.which("ffmpeg")
-        if not ffmpeg_bin:
-            raise RuntimeError("MP3 conversion requires ffmpeg (on PATH).")
-        subprocess.run(
-            [ffmpeg_bin, "-y", "-loglevel", "error", "-i", tmp_wav, AUDIO_FILE],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        try:
-            os.remove(tmp_wav)
-        except Exception:
-            pass
         if callback:
             callback(True, None)
     except Exception as e:
-        try:
-            if "tmp_wav" in locals() and os.path.exists(tmp_wav):
-                os.remove(tmp_wav)
-        except Exception:
-            pass
         if callback:
             callback(False, str(e))
 
@@ -368,7 +347,7 @@ class App(tk.Tk):
             if not v:
                 messagebox.showerror("Error", "Audio text cannot be empty.", parent=win)
                 return
-            prog.config(text="Generating MP3 audio…", fg=self.AMBER)
+            prog.config(text="Generating WAV audio…", fg=self.AMBER)
             win.update()
 
             def done(ok, err):
@@ -377,7 +356,7 @@ class App(tk.Tk):
                         self.cfg["audio_text"] = v
                         save_config(self.cfg)
                         self.at_lbl.config(text=self._trunc(v))
-                        prog.config(text="✓ MP3 saved!", fg=self.TEAL)
+                        prog.config(text="✓ WAV saved!", fg=self.TEAL)
                         self._log(f"Audio updated: \"{self._trunc(v)}\"")
                     else:
                         prog.config(text=f"Error: {err}", fg=self.RED)
@@ -387,7 +366,7 @@ class App(tk.Tk):
 
             threading.Thread(target=generate_audio, args=(v, done), daemon=True).start()
 
-        tk.Button(win, text="GENERATE & SAVE MP3", font=self.FB,
+        tk.Button(win, text="GENERATE & SAVE WAV", font=self.FB,
                   bg=self.AMBER, fg=self.BG, bd=0, cursor="hand2",
                   padx=18, pady=9, command=save).pack(pady=6)
 
