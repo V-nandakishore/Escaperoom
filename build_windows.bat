@@ -28,6 +28,7 @@ pyinstaller ^
     --hidden-import serial ^
     --hidden-import serial.tools.list_ports ^
     --hidden-import pygame.mixer ^
+    --hidden-import talker ^
     --collect-all gtts ^
     --collect-all pygame ^
     escape_room_gm.py
@@ -42,6 +43,7 @@ echo.
 echo Your executable is at:  dist\EscapeRoomGM.exe
 echo.
 echo Share the EscapeRoomGM.exe file — no Python needed on target machine!
-echo The config.json and audio.mp3 will be created next to the .exe on first run.
+echo The config.json and audio.wav will be created next to the .exe on first run.
 echo.
 pause
+

@@ -7,7 +7,7 @@ No external installs needed by end user.
 
 import tkinter as tk
 from tkinter import messagebox
-import json, os, sys, threading, datetime
+import json, os, sys, threading, datetime, time
 import subprocess
 
 # ── Resolve base path (works both in dev and PyInstaller bundle) ─────────────
@@ -26,7 +26,7 @@ def data_path(filename):
 
 # ── Bundled deps live inside the package ────────────────────────────────────
 CONFIG_FILE = data_path("config.json")
-AUDIO_FILE  = data_path("audio.wav")
+AUDIO_FILE  = data_path("audio.mp3")
 
 DEFAULT_CONFIG = {
     "passcode": "1234",
@@ -52,12 +52,15 @@ def _ps_quote(s):
     return s.replace("'", "''")
 
 def generate_audio(text, callback=None):
+    import tempfile, shutil
     try:
-        # Preferred path on Windows: built-in SAPI speech synthesis to WAV.
+        # Synthesize to temp WAV, convert to MP3, keep only MP3
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp_wav = tmp.name
         script = f"""
 Add-Type -AssemblyName System.Speech
 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-$synth.SetOutputToWaveFile('{_ps_quote(AUDIO_FILE)}')
+$synth.SetOutputToWaveFile('{_ps_quote(tmp_wav)}')
 $synth.Speak('{_ps_quote(text)}')
 $synth.Dispose()
 """
@@ -67,9 +70,27 @@ $synth.Dispose()
             capture_output=True,
             text=True,
         )
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            raise RuntimeError("MP3 conversion requires ffmpeg (on PATH).")
+        subprocess.run(
+            [ffmpeg_bin, "-y", "-loglevel", "error", "-i", tmp_wav, AUDIO_FILE],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            os.remove(tmp_wav)
+        except Exception:
+            pass
         if callback:
             callback(True, None)
     except Exception as e:
+        try:
+            if "tmp_wav" in locals() and os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
+        except Exception:
+            pass
         if callback:
             callback(False, str(e))
 
@@ -99,29 +120,60 @@ def play_audio():
     return False
 
 # ── Pico serial ───────────────────────────────────────────────────────────────
-def find_pico_port():
+def find_pico_ports():
     try:
         import serial.tools.list_ports
+        matches = []
         for p in serial.tools.list_ports.comports():
             hwid = (p.hwid or "").lower()
             desc = (p.description or "").lower()
             if "2e8a" in hwid or "pico" in desc or "circuitpython" in desc:
-                return p.device
+                matches.append(p.device)
+        return matches
     except Exception:
-        pass
-    return None
+        return []
 
-def send_to_pico(passcode, port=None):
+def find_pico_port():
+    ports = find_pico_ports()
+    return ports[0] if ports else None
+
+def _talker_sync(passcode, port):
     try:
-        import serial
-        port = port or find_pico_port()
-        if not port:
-            return False, "Pico not found"
-        with serial.Serial(port, 9600, timeout=2) as s:
-            s.write(f"PASSCODE:{passcode}\n".encode())
-        return True, port
+        from talker import Talker
+        t = Talker(port=port, baudrate=115200, timeout=2)
+        t.change_code(passcode)
+        t.close()
+        return True, f"{port} (talker)"
     except Exception as e:
         return False, str(e)
+
+def _line_sync(passcode, port):
+    try:
+        import serial
+        with serial.Serial(port, 9600, timeout=2) as s:
+            s.write(f"PASSCODE:{passcode}\n".encode("utf-8"))
+            s.flush()
+        return True, f"{port} (PASSCODE)"
+    except Exception as e:
+        return False, str(e)
+
+def send_to_pico(passcode, port=None):
+    ports = [port] if port else find_pico_ports()
+    if not ports:
+        return False, "Pico not found"
+
+    errors = []
+    for port_try in ports:
+        ok, msg = _talker_sync(passcode, port_try)
+        if ok:
+            return True, msg
+
+        ok2, msg2 = _line_sync(passcode, port_try)
+        if ok2:
+            return True, msg2
+        errors.append(f"{port_try}: talker={msg}; passcode={msg2}")
+
+    return False, " | ".join(errors)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # GUI
@@ -147,6 +199,7 @@ class App(tk.Tk):
         super().__init__()
         self.cfg       = load_config()
         self.pico_port = None
+        self._running  = True
 
         self.title("Escape Room — Game Master")
         self.geometry("620x560")
@@ -155,7 +208,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self._build()
-        threading.Thread(target=self._detect_pico, daemon=True).start()
+        threading.Thread(target=self._monitor_pico, daemon=True).start()
 
         # Pre-generate audio if wav missing
         if not os.path.exists(AUDIO_FILE):
@@ -315,7 +368,7 @@ class App(tk.Tk):
             if not v:
                 messagebox.showerror("Error", "Audio text cannot be empty.", parent=win)
                 return
-            prog.config(text="Generating WAV audio…", fg=self.AMBER)
+            prog.config(text="Generating MP3 audio…", fg=self.AMBER)
             win.update()
 
             def done(ok, err):
@@ -324,7 +377,7 @@ class App(tk.Tk):
                         self.cfg["audio_text"] = v
                         save_config(self.cfg)
                         self.at_lbl.config(text=self._trunc(v))
-                        prog.config(text="✓ WAV saved!", fg=self.TEAL)
+                        prog.config(text="✓ MP3 saved!", fg=self.TEAL)
                         self._log(f"Audio updated: \"{self._trunc(v)}\"")
                     else:
                         prog.config(text=f"Error: {err}", fg=self.RED)
@@ -334,7 +387,7 @@ class App(tk.Tk):
 
             threading.Thread(target=generate_audio, args=(v, done), daemon=True).start()
 
-        tk.Button(win, text="GENERATE & SAVE WAV", font=self.FB,
+        tk.Button(win, text="GENERATE & SAVE MP3", font=self.FB,
                   bg=self.AMBER, fg=self.BG, bd=0, cursor="hand2",
                   padx=18, pady=9, command=save).pack(pady=6)
 
@@ -369,17 +422,24 @@ class App(tk.Tk):
                   padx=24, pady=9, command=check).pack()
 
     # ── Pico ──────────────────────────────────────────────────────────────────
-    def _detect_pico(self):
-        port = find_pico_port()
-        def update_ui():
-            if port:
-                self.pico_port = port
-                self.pico_dot.config(text=f"◉ PICO: {port}", fg=self.TEAL)
-                self._log(f"Pico 2 found on {port}")
-            else:
-                self.pico_dot.config(text="◉ PICO: not found", fg=self.MUTED)
-                self._log("Pico not detected — connect via USB to enable sync.")
-        self.after(0, update_ui)
+    def _monitor_pico(self):
+        last_port = None
+        while self._running:
+            port = find_pico_port()
+            if port != last_port:
+                self.after(0, lambda p=port: self._update_pico_status(p))
+                last_port = port
+            time.sleep(2.0)
+
+    def _update_pico_status(self, port):
+        if port:
+            self.pico_port = port
+            self.pico_dot.config(text=f"◉ PICO: {port}", fg=self.TEAL)
+            self._log(f"Pico detected on {port}")
+        else:
+            self.pico_port = None
+            self.pico_dot.config(text="◉ PICO: not found", fg=self.MUTED)
+            self._log("Pico not detected — connect via USB to enable sync.")
 
     # ── Misc ──────────────────────────────────────────────────────────────────
     def _audio_done(self, ok, err):
@@ -396,6 +456,7 @@ class App(tk.Tk):
         self.log.config(state="disabled")
 
     def on_close(self):
+        self._running = False
         try:
             import pygame
             pygame.mixer.quit()

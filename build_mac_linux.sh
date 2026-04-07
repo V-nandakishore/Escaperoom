@@ -26,6 +26,7 @@ pyinstaller \
     --hidden-import serial \
     --hidden-import serial.tools.list_ports \
     --hidden-import pygame.mixer \
+    --hidden-import talker \
     --collect-all gtts \
     --collect-all pygame \
     escape_room_gm.py
@@ -41,3 +42,4 @@ echo "Your app is at:  dist/EscapeRoomGM"
 echo "(On Mac it will be dist/EscapeRoomGM.app)"
 echo
 echo "Share the file — no Python needed on target machine!"
+
